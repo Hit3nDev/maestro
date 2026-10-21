@@ -5,7 +5,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from maestro import theory, audio, search, ui
+from maestro import theory, audio, search, ui, evolve
 
 st.set_page_config(page_title="Maestro", page_icon="🎼", layout="wide")
 ui.inject_css()
@@ -70,7 +70,7 @@ def stage1():
         steps = [{"From": theory.midi_to_name(a), "To": theory.midi_to_name(b),
                   "Interval": theory.INTERVALS[b - a]} for a, b in zip(notes, notes[1:])]
         with st.expander("Interval steps"):
-            st.dataframe(pd.DataFrame(steps), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(steps), hide_index=True, width="stretch")
         if st.button("▶  Play scale (up and down)"):
             seq = notes + notes[-2::-1]
             st.audio(audio.to_wav_bytes(audio.render_melody(seq, [0.5] * len(seq), bpm, waveform)), format="audio/wav")
@@ -121,11 +121,11 @@ def stage1():
         with left:
             st.markdown("**Query 1 — scales containing every note of this chord**")
             st.dataframe(pd.DataFrame(theory.scales_containing_chord(G, sel)), hide_index=True,
-                         use_container_width=True, height=300)
+                         width="stretch", height=300)
         with right:
             k = st.slider("Query 2 — chords sharing at least k notes", 1, 3, 2)
             st.dataframe(pd.DataFrame(theory.chords_sharing_notes(G, sel, k)), hide_index=True,
-                         use_container_width=True, height=300)
+                         width="stretch", height=300)
 
         st.markdown("**Semantic network around this chord**")
         H = theory.chord_neighbourhood(G, sel)
@@ -232,7 +232,7 @@ def stage2():
     rows = [{"Algorithm": k, "Path": " → ".join(v["path"]), "Hops": v["hops"], "Total cost": v["cost"],
              "Nodes expanded": v["expanded"], "Max frontier": v["frontier_max"],
              "Optimal": "✓" if v["cost"] == best_cost else "✗"} for k, v in found.items()]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     st.subheader("Visualise one strategy")
     chosen = st.radio("Strategy", list(found.keys()), horizontal=True, label_visibility="collapsed")
@@ -267,12 +267,138 @@ def stage2():
             st.write(" → ".join(r["order"]))
 
     with st.expander("Strategy properties (viva notes)"):
-        st.dataframe(pd.DataFrame(search.PROPERTIES), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(search.PROPERTIES), hide_index=True, width="stretch")
         st.markdown("""
 - **b** = branching factor, **d** = depth of the shallowest goal, **m** = maximum depth, **C\\*** = optimal cost, **ε** = smallest edge cost.
 - BFS finds the fewest *hops*, but hops are not cost: UCS and A* find the smoothest *voice leading*.
 - A* and UCS reach the same cost; A* usually expands fewer nodes. That gap is the value of a good heuristic.
 - DFS finds *a* path quickly but it is often long and musically awkward: a textbook example of completeness without optimality.
+""")
+
+
+# =====================================================================
+# STAGE 3
+# =====================================================================
+def melody_audio(notes, bpm, waveform, drone_midi=None):
+    samples = audio.render_melody([n[0] for n in notes], [n[1] for n in notes], bpm, waveform).copy()
+    if drone_midi is not None and len(samples):
+        dur = len(samples) / audio.SR
+        drone = audio.synth_tone(theory.midi_to_freq(drone_midi), dur, "sine", 0.10) \
+              + audio.synth_tone(theory.midi_to_freq(drone_midi + 7), dur, "sine", 0.05)
+        n = min(len(samples), len(drone))
+        samples[:n] += drone[:n]
+    return audio.to_wav_bytes(samples)
+
+
+def piano_roll(notes, ctx, title):
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    ui.style_axes(fig, ax, title)
+    t = 0.0
+    for m, d in notes:
+        if m is not None:
+            ax.add_patch(plt.Rectangle((t, m - 0.42), d - 0.06, 0.84, color=ui.PALETTE["gold"], alpha=.95))
+        t += d
+    ax.set_yticks(ctx.pitches)
+    ax.set_yticklabels([ctx.label(m) for m in ctx.pitches], fontsize=7)
+    ax.set_ylim(min(ctx.pitches) - 1, max(ctx.pitches) + 1)
+    ax.set_xlim(0, max(t, 1))
+    ax.set_xlabel("beats")
+    for b in range(0, int(t) + 1, 4):
+        ax.axvline(b, color=ui.PALETTE["line"], lw=.8)
+    return fig
+
+
+def stage3():
+    ui.hero("Unit 3 · Optimisation", "Melody Evolver",
+            "Random noise becomes a melody through selection, crossover and mutation. Pick a tradition, "
+            "watch fitness climb, and listen to generation one against the final generation.")
+
+    c1, c2, c3 = st.columns([1.1, 1, 1])
+    tradition = c1.radio("Tradition (fitness function)", list(evolve.FITNESS.keys()), horizontal=True)
+    scale_opts = evolve.raga_scales() if tradition == "Hindustani raga" else evolve.western_scales()
+    root = c2.selectbox("Root / Sa", theory.NOTE_NAMES, index=0, key="e_root")
+    scale = c3.selectbox("Scale / Raga", scale_opts, key="e_scale_" + tradition)
+
+    if scale in evolve.RAGA_INFO:
+        info = evolve.RAGA_INFO[scale]
+        ui.card(f"{scale}",
+                f"Vadi (king note): <b>{info['sargam'][info['vadi']]}</b> · Samvadi (minister): <b>{info['sargam'][info['samvadi']]}</b> · "
+                f"Time: {info['time']} · Mood: {info['mood']}. The fitness function rewards dwelling on the vadi, "
+                f"sustained notes, stepwise movement and resolving to Sa.")
+    else:
+        ui.card("Western tonal fitness",
+                "Rewards stepwise motion, chord tones on strong beats, a clear contour, variety, a comfortable range, "
+                "leading-tone resolution and starting/ending on the tonic.")
+
+    with st.expander("Genetic algorithm parameters", expanded=False):
+        p1, p2, p3, p4, p5 = st.columns(5)
+        length = p1.selectbox("Melody length (8th notes)", [16, 24, 32], index=0)
+        pop_size = p2.slider("Population", 20, 150, 60, step=10)
+        generations = p3.slider("Generations", 10, 200, 80, step=10)
+        mutation = p4.slider("Mutation rate", 0.01, 0.30, 0.08, step=0.01)
+        seed = p5.number_input("Random seed", 0, 9999, 42)
+    a1, a2 = st.columns(2)
+    bpm = a1.slider("Tempo (BPM)", 50, 180, 96 if tradition == "Western tonal" else 72, key="e_bpm")
+    waveform = a2.selectbox("Instrument", INSTRUMENTS, key="e_wave")
+
+    if st.button("✦  Evolve a melody"):
+        ctx = evolve.Context(root, scale, tradition, length=length)
+        with st.spinner("Evolving…"):
+            result = evolve.evolve(ctx, evolve.FITNESS[tradition], pop_size, generations, mutation, seed=int(seed))
+        st.session_state["evo"] = {"ctx": ctx, "result": result, "tradition": tradition}
+
+    if "evo" not in st.session_state:
+        st.info("Set your options and press Evolve.")
+        return
+
+    ctx, result, trad = st.session_state["evo"]["ctx"], st.session_state["evo"]["result"], st.session_state["evo"]["tradition"]
+    hist = pd.DataFrame(result["history"])
+    other = [t for t in evolve.FITNESS if t != trad][0]
+    cross_score, _ = evolve.FITNESS[other](result["best"], ctx)
+    drone = ctx.pitches[0] - 12 if trad == "Hindustani raga" else None
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Generation 1 best", f"{hist['best'].iloc[0]:.1f}")
+    m2.metric("Final best", f"{result['fitness']:.1f}", f"+{result['fitness'] - hist['best'].iloc[0]:.1f}", delta_color="off")
+    m3.metric(f"Scored by {trad}", f"{result['fitness']:.0f}")
+    m4.metric(f"Same melody scored by {other}", f"{cross_score:.0f}", "the gap is Stage 5's story", delta_color="off")
+
+    g1, g2 = st.columns([1.2, 1])
+    with g1:
+        fig, ax = plt.subplots(figsize=(7, 3.4))
+        ui.style_axes(fig, ax, "Convergence")
+        ax.plot(hist["generation"], hist["best"], color=ui.PALETTE["gold"], lw=2.2, label="best")
+        ax.plot(hist["generation"], hist["mean"], color=ui.PALETTE["violet2"], lw=1.4, label="population mean")
+        ax.fill_between(hist["generation"], hist["mean"], hist["best"], color=ui.PALETTE["gold"], alpha=.08)
+        ax.set_xlabel("generation")
+        ax.set_ylabel("fitness")
+        ax.legend(frameon=False, labelcolor=ui.PALETTE["ink"], fontsize=8)
+        st.pyplot(fig)
+        plt.close(fig)
+    with g2:
+        st.markdown("**Fitness breakdown of the final melody**")
+        bd = pd.DataFrame([{"Component": k, "Score": v} for k, v in result["breakdown"].items()])
+        st.dataframe(bd, hide_index=True, width="stretch", height=330)
+
+    st.subheader("Listen to evolution")
+    cols = st.columns(len(result["snapshots"]))
+    for col, snap in zip(cols, result["snapshots"]):
+        col.markdown(f"**Generation {snap['generation']}**  \nfitness {snap['fitness']:.1f}")
+        col.audio(melody_audio(evolve.decode(snap["genome"], ctx), bpm, waveform, drone), format="audio/wav")
+
+    final_notes = evolve.decode(result["best"], ctx)
+    fig = piano_roll(final_notes, ctx, f"Final melody · {ctx.root} {ctx.scale_name}")
+    st.pyplot(fig)
+    plt.close(fig)
+    ui.chips([ctx.label(m) for m, _ in final_notes if m is not None])
+
+    with st.expander("How the genetic algorithm works here (viva notes)"):
+        st.markdown(f"""
+- **Genome:** {ctx.length} genes. Each gene is an index into the {len(ctx.pitches)} available scale notes, or `HOLD` to sustain the previous note.
+- **Fitness:** a weighted sum of musical criteria (table above). Changing the tradition changes the criteria, not the algorithm.
+- **Selection:** tournament of 3. **Crossover:** one-point. **Mutation:** per-gene; a mutated gene becomes a hold, nudges by a step or two, or re-randomises.
+- **Elitism:** the top 2 survive unchanged so the best fitness never decreases (the gold curve is monotone).
+- **Why it matters for ethics:** the metric on the far right scores the *same* melody under the other tradition's rules. A fitness function is a value judgement encoded as arithmetic.
 """)
 
 
@@ -286,7 +412,7 @@ if page == STAGES[0]:
 elif page == STAGES[1]:
     stage2()
 elif page == STAGES[2]:
-    placeholder("Melody Evolver", "A genetic algorithm that evolves melodies you can listen to, generation by generation.")
+    stage3()
 elif page == STAGES[3]:
     placeholder("Theory Checker & Composer Agent", "Propositional and first-order rule engine with proofs, under Western or Hindustani rule sets, driven by a goal-based agent.")
 else:
