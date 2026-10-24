@@ -6,7 +6,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from maestro import theory, audio, search, ui, evolve, logic, agent
+from maestro import theory, audio, search, ui, evolve, logic, agent, ml
 
 st.set_page_config(page_title="Maestro", page_icon="🎼", layout="wide")
 ui.inject_css()
@@ -109,6 +109,26 @@ def parse_notes(text):
     if len(notes) < 2:
         raise ValueError("Enter at least two notes.")
     return notes
+
+
+def grouped_bars(title, labels, series, ylabel, ylim=None):
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ui.style_axes(fig, ax, title)
+    x = range(len(labels))
+    w = 0.8 / len(series)
+    colours = [ui.PALETTE["violet"], ui.PALETTE["gold"], ui.PALETTE["teal"]]
+    for k, (name, vals) in enumerate(series.items()):
+        xs = [i + (k - (len(series) - 1) / 2) * w for i in x]
+        ax.bar(xs, vals, width=w, label=name, color=colours[k % 3])
+        for xi, v in zip(xs, vals):
+            ax.text(xi, v, f"{v:.2f}" if v <= 1 else f"{v:.0f}", ha="center", va="bottom", fontsize=7, color=ui.PALETTE["ink"])
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel(ylabel)
+    if ylim:
+        ax.set_ylim(*ylim)
+    ax.legend(frameon=False, labelcolor=ui.PALETTE["ink"], fontsize=8)
+    return fig
 
 
 # =====================================================================
@@ -380,7 +400,7 @@ def stage3():
         ctx = evolve.Context(root, scale, tradition, length=length)
         with st.spinner("Evolving…"):
             result = evolve.evolve(ctx, evolve.FITNESS[tradition], pop_size, generations, mutation, seed=int(seed))
-        st.session_state["evo"] = {"ctx": ctx, "result": result, "tradition": tradition}
+        st.session_state["evo"] = {"ctx": ctx, "result": result, "tradition": tradition, "bpm": bpm}
 
     if "evo" not in st.session_state:
         st.info("Set your options and press Evolve.")
@@ -426,7 +446,7 @@ def stage3():
     st.pyplot(fig)
     plt.close(fig)
     ui.chips([safe_label(ctx, m) for m, _ in final_notes if m is not None])
-    st.caption("This melody is now available in the Theory Checker.")
+    st.caption("This melody is now available in the Theory Checker and the Mood Classifier.")
 
     with st.expander("How the genetic algorithm works here"):
         st.markdown(f"""
@@ -441,7 +461,7 @@ def stage3():
 # =====================================================================
 # STAGE 4
 # =====================================================================
-def violations_panel(title, res, notes, ctx, bpm, waveform, key):
+def violations_panel(title, res, notes, ctx):
     st.markdown(f"### {title}")
     n_v = len(res["violations"])
     m1, m2 = st.columns(2)
@@ -511,9 +531,9 @@ def stage4():
     with tab1:
         left, right = st.columns(2)
         with left:
-            violations_panel("Western tonal rules", res_w, notes, ctx_w, bpm, waveform, "w")
+            violations_panel("Western tonal rules", res_w, notes, ctx_w)
         with right:
-            violations_panel("Hindustani raga rules", res_r, notes, ctx_r, bpm, waveform, "r")
+            violations_panel("Hindustani raga rules", res_r, notes, ctx_r)
         ui.card("Same notes, different verdicts",
                 f"The Western rule set found <b>{len(res_w['violations'])}</b> violations and the raga rule set found "
                 f"<b>{len(res_r['violations'])}</b>. Neither is wrong: each encodes a different tradition's grammar. "
@@ -596,10 +616,172 @@ def stage4():
 
 
 # =====================================================================
-def placeholder(title, desc):
-    ui.hero("Coming next", title, desc)
+# STAGE 5
+# =====================================================================
+def stage5():
+    ui.hero("Machine learning & ethics", "Mood Classifier & Bias Audit",
+            "A model learns to hear mood from a melody's shape. Then we ask the uncomfortable question: "
+            "does it hear Indian music as well as Western music, and is its idea of 'quality' fair?")
+
+    with st.expander("Dataset settings", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        n = c1.slider("Melodies to generate", 200, 1200, 600, step=100)
+        share = c2.slider("Share of Western melodies in the training data", 0.5, 0.95, 0.9, step=0.05)
+        seed = c3.number_input("Seed", 0, 999, 7, key="m_seed")
+    if st.button("✦  Generate data and train"):
+        with st.spinner("Generating melodies and training models…"):
+            df = ml.generate_dataset(n, share, int(seed))
+            res = ml.train_models(df, int(seed))
+            df_fair = ml.generate_dataset(n, 0.5, int(seed) + 1)
+            res_fair = ml.train_models(df_fair, int(seed) + 1)
+            q_biased = ml.quality_scores(df_fair, culturally_aware=False)
+            q_fair = ml.quality_scores(df_fair, culturally_aware=True)
+        st.session_state["ml"] = {"df": df, "res": res, "df_fair": df_fair, "res_fair": res_fair,
+                                  "q_biased": q_biased, "q_fair": q_fair, "share": share}
+    if "ml" not in st.session_state:
+        st.info("Press the button to generate a dataset and train the models.")
+        return
+
+    M = st.session_state["ml"]
+    df, res, df_fair, res_fair = M["df"], M["res"], M["df_fair"], M["res_fair"]
+    groups = ["Western tonal", "Hindustani raga"]
+    tab1, tab2, tab3 = st.tabs(["Mood classifier", "Bias audit", "The fix"])
+
+    with tab1:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Random Forest accuracy", f"{res['acc_rf'] * 100:.1f}%")
+        m2.metric("Logistic Regression accuracy", f"{res['acc_lr'] * 100:.1f}%")
+        m3.metric("Training / test melodies", f"{res['n_train']} / {res['n_test']}")
+        m4.metric("Hindustani share of data", f"{(df['tradition'] == 'Hindustani raga').mean() * 100:.0f}%")
+
+        g1, g2 = st.columns(2)
+        with g1:
+            fig, ax = plt.subplots(figsize=(4.5, 3.8))
+            ui.style_axes(fig, ax, "Confusion matrix (Random Forest)")
+            cm = res["confusion"]
+            ax.imshow(cm, cmap="magma")
+            ax.set_xticks(range(4)); ax.set_xticklabels(ml.MOOD_ORDER, fontsize=8)
+            ax.set_yticks(range(4)); ax.set_yticklabels(ml.MOOD_ORDER, fontsize=8)
+            ax.set_xlabel("predicted"); ax.set_ylabel("actual")
+            ax.grid(False)
+            for i in range(4):
+                for j in range(4):
+                    ax.text(j, i, cm[i, j], ha="center", va="center", fontsize=9,
+                            color="#fff" if cm[i, j] < cm.max() / 2 else "#111")
+            st.pyplot(fig); plt.close(fig)
+        with g2:
+            imp = sorted(res["importances"].items(), key=lambda kv: kv[1])
+            fig, ax = plt.subplots(figsize=(5, 3.8))
+            ui.style_axes(fig, ax, "What the model listens to (feature importance)")
+            ax.barh([ml.FEATURE_LABELS[k] for k, _ in imp], [v for _, v in imp], color=ui.PALETTE["gold"])
+            ax.tick_params(axis="y", labelsize=7)
+            st.pyplot(fig); plt.close(fig)
+
+        if "evo" in st.session_state:
+            evo = st.session_state["evo"]
+            notes = evolve.decode(evo["result"]["best"], evo["ctx"])
+            probs, feats = ml.predict_one(res["rf"], notes, evo.get("bpm", 96), evo["ctx"])
+            top = max(probs, key=probs.get)
+            st.markdown(f"**Your evolved melody** ({evo['ctx'].root} {evo['ctx'].scale_name}) sounds **{top}** "
+                        f"to the model, with {probs[top] * 100:.0f}% confidence.")
+            fig, ax = plt.subplots(figsize=(6, 1.8))
+            ui.style_axes(fig, ax)
+            ax.barh(list(probs.keys()), list(probs.values()), color=ui.PALETTE["violet2"])
+            ax.set_xlim(0, 1)
+            st.pyplot(fig); plt.close(fig)
+
+        with st.expander("Regression: predicting tempo from the other features"):
+            st.write(f"A linear regression predicts a melody's tempo from its shape alone. R² on the test set: **{res['reg_r2']:.2f}**.")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            ui.style_axes(fig, ax, "Actual vs predicted tempo")
+            ax.scatter(res["reg_actual"], res["reg_pred"], s=10, color=ui.PALETTE["gold"], alpha=.7)
+            lo, hi = min(res["reg_actual"]), max(res["reg_actual"])
+            ax.plot([lo, hi], [lo, hi], color=ui.PALETTE["muted"], lw=1, ls="--")
+            ax.set_xlabel("actual BPM"); ax.set_ylabel("predicted BPM")
+            st.pyplot(fig); plt.close(fig)
+
+    with tab2:
+        acc = res["per_group"]
+        q = M["q_biased"]
+        mean_q = {g: float(q[df_fair["tradition"] == g].mean()) for g in groups}
+        rate = {g: float((q[df_fair["tradition"] == g] >= 45).mean()) for g in groups}
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Accuracy gap (Western − Hindustani)", f"{(acc[groups[0]] - acc[groups[1]]) * 100:+.1f} pts")
+        m2.metric("Mean 'quality' gap (Western scorer)", f"{mean_q[groups[0]] - mean_q[groups[1]]:+.1f}")
+        dp = rate[groups[1]] / rate[groups[0]] if rate[groups[0]] else float("nan")
+        m3.metric("Demographic parity ratio", f"{dp:.2f}", "fair if close to 1.0 (80% rule: ≥ 0.8)", delta_color="off")
+
+        g1, g2 = st.columns(2)
+        with g1:
+            fig = grouped_bars("Mood accuracy by tradition", ["Western", "Hindustani"],
+                               {"Trained on skewed data": [acc[groups[0]], acc[groups[1]]]}, "accuracy", (0, 1.1))
+            st.pyplot(fig); plt.close(fig)
+        with g2:
+            fig = grouped_bars("Mean quality score by tradition", ["Western", "Hindustani"],
+                               {"Western-only scoring": [mean_q[groups[0]], mean_q[groups[1]]]}, "fitness score")
+            st.pyplot(fig); plt.close(fig)
+
+        ui.card("What happened",
+                f"The classifier was trained on data that was {M['share'] * 100:.0f}% Western. Hindustani melodies are slower and "
+                "more sustained by convention, so the model learned those traits as 'sad' or 'calm' and misreads happy ragas. "
+                "Separately, scoring every melody with the Western fitness function rates ragas as lower quality: they are being "
+                "graded on rules they were never meant to follow. Neither failure is malicious. Both come from an unexamined default.")
+        with st.expander("Fairness metrics explained"):
+            st.markdown("""
+- **Accuracy parity:** the model should be equally accurate for every group. The gap above is the shortfall for Hindustani music.
+- **Demographic parity:** the share of melodies rated 'high quality' (score ≥ 45) should be similar across groups. The ratio
+  compares the Hindustani rate to the Western rate; US hiring law's *four-fifths rule* treats ratios under 0.8 as evidence of adverse impact.
+- **Representation bias:** the training set under-represents one group, so the model never learns its patterns.
+- **Measurement bias:** the quality score itself encodes one culture's values as if they were universal.
+""")
+
+    with tab3:
+        acc = res["per_group"]
+        acc_f = res_fair["per_group"]
+        q = M["q_biased"]
+        qf = M["q_fair"]
+        mean_q = {g: float(q[df_fair["tradition"] == g].mean()) for g in groups}
+        mean_qf = {g: float(qf[df_fair["tradition"] == g].mean()) for g in groups}
+        rate_f = {g: float((qf[df_fair["tradition"] == g] >= 45).mean()) for g in groups}
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Accuracy gap after rebalancing", f"{(acc_f[groups[0]] - acc_f[groups[1]]) * 100:+.1f} pts")
+        m2.metric("Quality gap with culturally aware scoring", f"{mean_qf[groups[0]] - mean_qf[groups[1]]:+.1f}")
+        dp_f = rate_f[groups[1]] / rate_f[groups[0]] if rate_f[groups[0]] else float("nan")
+        m3.metric("Demographic parity ratio after fix", f"{dp_f:.2f}")
+
+        g1, g2 = st.columns(2)
+        with g1:
+            fig = grouped_bars("Accuracy: before vs after", ["Western", "Hindustani"],
+                               {"Skewed data": [acc[groups[0]], acc[groups[1]]],
+                                "Balanced data": [acc_f[groups[0]], acc_f[groups[1]]]}, "accuracy", (0, 1.1))
+            st.pyplot(fig); plt.close(fig)
+        with g2:
+            fig = grouped_bars("Quality score: before vs after", ["Western", "Hindustani"],
+                               {"Western-only scorer": [mean_q[groups[0]], mean_q[groups[1]]],
+                                "Own-tradition scorer": [mean_qf[groups[0]], mean_qf[groups[1]]]}, "fitness score")
+            st.pyplot(fig); plt.close(fig)
+
+        ui.card("Two fixes, two kinds of bias",
+                "<b>Representation bias</b> is fixed by rebalancing the training data to 50/50, so the model actually sees "
+                "Hindustani patterns. <b>Measurement bias</b> is fixed by scoring each melody with its own tradition's rules, "
+                "which is exactly what the Melody Evolver and Theory Checker already allow. The architecture of the whole "
+                "project is the mitigation: swappable rule sets, swappable fitness functions, and proofs for every judgement.")
+        with st.expander("Transparency, privacy and limitations"):
+            st.markdown("""
+- **Transparency:** every violation in the Theory Checker comes with a proof; every mood prediction shows the features it relied on.
+  A user can contest a judgement because they can see it.
+- **Privacy:** all data here is synthetic, so nothing personal is processed. A real system trained on user recordings would need consent,
+  minimisation, and a clear retention policy.
+- **Limitations:** the ragas are simplified (no ornaments, microtones, or time-of-day rules), the dataset is generated rather than
+  recorded, and the fairness numbers depend on the random seed. The point is the method, not the exact figures.
+- **Ownership:** generated melodies have no human composer. Who owns them, and whether training on a tradition's music is
+  extractive, are open ethical questions this project can only raise.
+""")
 
 
+# =====================================================================
 if page == STAGES[0]:
     stage1()
 elif page == STAGES[1]:
@@ -609,4 +791,4 @@ elif page == STAGES[2]:
 elif page == STAGES[3]:
     stage4()
 else:
-    placeholder("Mood & Ethics", "ML mood classifier plus the cultural-bias audit that gives the project its problem statement.")
+    stage5()
